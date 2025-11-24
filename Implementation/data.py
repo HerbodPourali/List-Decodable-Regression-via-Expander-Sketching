@@ -17,102 +17,111 @@ class RegressionDataInfo:
 
     def to_dict(self):
         d = asdict(self)
-        # Convert arrays to lists for JSON-friendliness if needed
         d["inlier_indices"] = self.inlier_indices.tolist()
         d["outlier_indices"] = self.outlier_indices.tolist()
         return d
 
-
 def generate_regression_with_outliers(
     n: int = 5000,
     d: int = 20,
-    alpha: float = 0.3,          # fraction of inliers
+    alpha: float = 0.3,
     sigma_inlier: float = 0.1,
-    outlier_mode: str = "uniform",   # "uniform", "skewed", "gaussian_heavy", "signflip"
+
+    # Outlier response noise
+    outlier_mode: str = "uniform",   # uniform, gaussian_heavy, skewed, directional, clustered, mixed
     outlier_scale: float = 10.0,
-    corrupt_X: bool = False,         # if True, also corrupt features of outliers
-    random_state: int = 0,
+
+    # Optional leverage outliers (heavy-tailed X)
+    corrupt_X: bool = False,
+    random_state: int = 123,
+    leverage_df: float = 2.0,         # degrees of freedom for heavy-tailed X
 ):
     """
-    Generate synthetic linear regression data with a controlled fraction of outliers.
-
-    Inliers follow:
-        y_i = x_i^T w_star + ξ_i,   ξ_i ~ N(0, sigma_inlier^2)
-
-    Outliers have responses generated independently of x_i, depending on outlier_mode.
-
-    Args:
-        n: number of samples
-        d: dimension
-        alpha: fraction of inliers (0 < alpha <= 1)
-        sigma_inlier: std dev of Gaussian noise on inliers
-        outlier_mode: type of corruption for y on outliers
-        outlier_scale: scale parameter for outlier noise
-        corrupt_X: if True, features X for outliers are also resampled in a nasty way
-        random_state: RNG seed
-
-    Returns:
-        X: (n, d) array of features
-        y: (n,) array of responses (corrupted)
-        w_star: (d,) true regression vector
-        inlier_mask: boolean array of shape (n,)
-        info: RegressionDataInfo metadata object
+    Hard synthetic regression data generator (cleaner version):
+        - No signflip mode
+        - No preset system
+        - No anisotropy or normalization options
+        - Purely Gaussian design (so we do not destabilize experiments)
+        - Strong, realistic, multi-mode outlier corruptions
+        - Optional leverage outliers via heavy-tailed X for outliers
     """
     rng = np.random.default_rng(random_state)
 
-    # Sanity check on alpha
+    # --- Verify alpha ---
     if not (0 < alpha <= 1):
         raise ValueError("alpha must be in (0, 1].")
 
-    # 1) True parameter and clean design
+    # --- True regression parameter ---
     w_star = rng.normal(size=d)
+
+    # --- Design matrix (Gaussian isotropic only!) ---
     X = rng.normal(size=(n, d))
 
-    # 2) Assign inliers/outliers
+    # --- Inlier / outlier split ---
     n_inliers = int(np.round(alpha * n))
     indices = np.arange(n)
     rng.shuffle(indices)
     inlier_idx = indices[:n_inliers]
     outlier_idx = indices[n_inliers:]
-
     inlier_mask = np.zeros(n, dtype=bool)
     inlier_mask[inlier_idx] = True
 
-    # 3) Clean inlier responses
+    # --- Clean responses ---
     y_clean = X @ w_star + rng.normal(scale=sigma_inlier, size=n)
-
-    # 4) Initialize y with clean values
     y = y_clean.copy()
 
-    # 5) Optionally corrupt X for outliers
-    if corrupt_X and len(outlier_idx) > 0:
-        # Example: resample from a heavier-tailed distribution for outliers
-        X[outlier_idx] = rng.normal(loc=0.0, scale=outlier_scale, size=(len(outlier_idx), d))
-
-    # 6) Generate outlier responses depending on mode
+    # --- Leverage outliers: corrupt X with heavy-tailed rows ---
     m = len(outlier_idx)
+    if corrupt_X and m > 0:
+        X[outlier_idx] = (
+            rng.standard_t(df=leverage_df, size=(m, d)) * outlier_scale
+        )
+
+    # --- Outlier responses ---
     if m > 0:
         if outlier_mode == "uniform":
-            # Uniform in a wide interval
             y_out = rng.uniform(-outlier_scale, outlier_scale, size=m)
 
         elif outlier_mode == "skewed":
-            # Example skewed: exponential, shifted to be roughly centered
             y_out = rng.exponential(scale=outlier_scale, size=m) - (outlier_scale / 2.0)
 
         elif outlier_mode == "gaussian_heavy":
-            # Gaussian with much larger variance than inliers
             y_out = rng.normal(loc=0.0, scale=outlier_scale, size=m)
 
-        elif outlier_mode == "signflip":
-            # Adversarial-style: use clean prediction but flip and blow up
-            y_out = -(X[outlier_idx] @ w_star) * outlier_scale
+        elif outlier_mode == "directional":
+            # Hard outliers aligned with a random direction
+            u = rng.normal(size=d)
+            u /= np.linalg.norm(u)
+            y_out = (X[outlier_idx] @ u) * outlier_scale
 
+        elif outlier_mode == "clustered":
+            c = rng.normal(loc=0.0, scale=outlier_scale)
+            y_out = c + rng.normal(scale=1.0, size=m)
+
+        elif outlier_mode == "mixed":
+            # Realistic mixture of several kinds
+            modes = rng.choice(
+                ["uniform", "gaussian_heavy", "skewed", "directional"],
+                size=m,
+                replace=True,
+            )
+            y_out = np.empty(m)
+            for j, mode in enumerate(modes):
+                if mode == "uniform":
+                    y_out[j] = rng.uniform(-outlier_scale, outlier_scale)
+                elif mode == "gaussian_heavy":
+                    y_out[j] = rng.normal(0.0, outlier_scale)
+                elif mode == "skewed":
+                    y_out[j] = rng.exponential(outlier_scale) - outlier_scale / 2.0
+                elif mode == "directional":
+                    u_loc = rng.normal(size=d); u_loc /= np.linalg.norm(u_loc)
+                    y_out[j] = (X[outlier_idx[j:j+1]] @ u_loc)[0] * outlier_scale
         else:
             raise ValueError(f"Unknown outlier_mode: {outlier_mode}")
 
         y[outlier_idx] = y_out
 
+    # --- Metadata ---
     info = RegressionDataInfo(
         n=n,
         d=d,

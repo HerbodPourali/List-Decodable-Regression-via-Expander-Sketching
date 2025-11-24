@@ -1,21 +1,15 @@
-# sanity_checks.py
+# experiments_synthetic.py (formerly sanity_checks.py)
 import os
 import csv
 import numpy as np
+import networkx as nx   # for optional expander construction
 
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error
 
 from data import generate_regression_with_outliers
-from expander_sketch_regression import bucketed_median_regression
 from expander_sketch_single import expander_sketch_regression_single_seed
-from expander_sketch_list import (
-    expander_sketch_list_regression,
-    oracle_inlier_bucket_regression,
-    # debug_bucket_contamination,
-    # debug_bucket_scores_vs_goodness,
-    # debug_survivor_goodness,
-)
+from expander_sketch_list import expander_sketch_list_regression
 from baselines_sklearn import fit_ridge, fit_huber, fit_ransac, fit_theilsen
 
 def append_result_wide(csv_path, result_dict):
@@ -41,7 +35,40 @@ def append_result_wide(csv_path, result_dict):
             writer.writeheader()
         writer.writerow({k: result_dict.get(k, "") for k in fieldnames})
 
-def run_all_methods_for_alpha(alpha, outlier_mode="uniform", random_state=0):
+def make_random_regular_bipartite_expander(n, B, dL, seed=0):
+    """
+    Build a random left-regular bipartite graph using NetworkX:
+
+        - Left nodes:  0 .. n-1      (samples)
+        - Right nodes: n .. n+B-1    (buckets)
+
+    Each left node has degree exactly dL.
+    """
+    rng = np.random.default_rng(seed)
+    G = nx.Graph()
+
+    # Left side
+    G.add_nodes_from(range(n), bipartite=0)
+    # Right side
+    G.add_nodes_from(range(n, n + B), bipartite=1)
+
+    for i in range(n):
+        neighbors = rng.choice(np.arange(n, n + B), size=dL, replace=False)
+        for v in neighbors:
+            G.add_edge(i, v)
+
+    return G
+
+def run_all_methods_for_alpha(
+    alpha,
+    outlier_mode: str = "uniform",
+    random_state: int = 0,
+    use_networkx_expander: bool = False,
+    # NEW: expose n, d, outlier_scale so we can sweep them
+    n: int = 5000,
+    d: int = 20,
+    outlier_scale: float = 10.0,
+):
     """
     Run one synthetic experiment for a given alpha and outlier model.
     Returns a dict of metrics for all methods.
@@ -50,24 +77,16 @@ def run_all_methods_for_alpha(alpha, outlier_mode="uniform", random_state=0):
     - save_uniform_results.py
     - plot_uniform.py
     - future experiment sweep scripts
+
+    use_networkx_expander:
+        If True, Expander-1 and Expander-L will use a NetworkX-generated
+        bipartite expander graph (same graph shared across seeds).
+        If False (default), they use the original random hashing construction.
+
+    n, d, outlier_scale:
+        Global problem size and corruption strength. We vary these in
+        the additional sweeps (across n, d, and outlier_scale).
     """
-
-    # 0. Global experiment knobs (easy to tune later)
-    n = 5000
-    d = 20
-    noise_std = 0.1
-    outlier_scale = 10.0
-
-    # Oracle bucket parameters
-    r_oracle = 5
-    B_oracle = 1000
-    k_in_min = 5
-    k_out_max = 5
-
-    # MoM (batch) parameters
-    mom_n_buckets = 50
-    mom_n_reps = 5
-    mom_lambda = 1e-3
 
     # Expander-single parameters
     B_sketch = 1000
@@ -82,10 +101,7 @@ def run_all_methods_for_alpha(alpha, outlier_mode="uniform", random_state=0):
     exp_list_lambda = 1e-3
     exp_list_theta = 0.1
     exp_list_rho = 0.5
-    exp_list_cluster_radius = 0.0
-
-    # Decide pruning rule:
-    prune_mode = "flip" if outlier_mode == "signflip" else "paper"
+    exp_list_cluster_radius = 0.0  # no merging of candidate vectors
 
     # 1. Generate synthetic data
     X, y, w_star, inlier_mask, info = generate_regression_with_outliers(
@@ -94,9 +110,19 @@ def run_all_methods_for_alpha(alpha, outlier_mode="uniform", random_state=0):
         alpha=alpha,
         outlier_mode=outlier_mode,
         outlier_scale=outlier_scale,
-        # current generate_regression_with_outliers does not take noise_std
         random_state=random_state,
     )
+
+    # 1.5 Construct NetworkX expander if requested
+    if use_networkx_expander:
+        G_expander = make_random_regular_bipartite_expander(
+            n=n,
+            B=B_sketch,
+            dL=exp_single_dL,
+            seed=123 + random_state,
+        )
+    else:
+        G_expander = None
 
     # Test set for all methods
     rng = np.random.default_rng(123 + random_state)
@@ -106,6 +132,10 @@ def run_all_methods_for_alpha(alpha, outlier_mode="uniform", random_state=0):
     results = {
         "alpha": alpha,
         "mode": outlier_mode,
+        "use_networkx": int(use_networkx_expander),  # 0/1 flag for logging
+        "n": n,
+        "d": d,
+        "outlier_scale": outlier_scale,
     }
 
     # 2. Baselines: OLS
@@ -114,28 +144,7 @@ def run_all_methods_for_alpha(alpha, outlier_mode="uniform", random_state=0):
     results["ols_err"] = np.linalg.norm(beta_ols - w_star)
     results["ols_mse"] = mean_squared_error(y_test, X_test @ beta_ols)
 
-    # 3. Oracle baseline
-    if alpha < 1.0:
-        beta_oracle, K_good, B_val = oracle_inlier_bucket_regression(
-            X, y, inlier_mask=inlier_mask,
-            alpha=alpha,
-            r=r_oracle,
-            B=B_oracle,
-            dL=2,
-            k_in_min=k_in_min,
-            k_out_max=k_out_max,
-            lambda_reg=1e-3,
-            random_state=123,
-        )
-        results["oracle_err"] = np.linalg.norm(beta_oracle - w_star)
-        results["oracle_mse"] = mean_squared_error(y_test, X_test @ beta_oracle)
-        results["oracle_K_good"] = K_good
-        results["oracle_total_buckets"] = B_val * r_oracle
-    else:
-        results["oracle_err"] = None
-        results["oracle_mse"] = None
-
-    # 4. Sklearn baselines
+    # 3. Sklearn baselines
     # Ridge
     beta_ridge = fit_ridge(X, y, alpha=1.0)
     results["ridge_err"] = np.linalg.norm(beta_ridge - w_star)
@@ -147,8 +156,13 @@ def run_all_methods_for_alpha(alpha, outlier_mode="uniform", random_state=0):
     results["huber_mse"] = mean_squared_error(y_test, X_test @ beta_huber)
 
     # RANSAC
-    beta_ransac = fit_ransac(X, y, min_samples=None,
-                             residual_threshold=None, max_trials=100)
+    beta_ransac = fit_ransac(
+        X,
+        y,
+        min_samples=None,
+        residual_threshold=None,
+        max_trials=100,
+    )
     results["ransac_err"] = np.linalg.norm(beta_ransac - w_star)
     results["ransac_mse"] = mean_squared_error(y_test, X_test @ beta_ransac)
 
@@ -157,34 +171,29 @@ def run_all_methods_for_alpha(alpha, outlier_mode="uniform", random_state=0):
     results["theilsen_err"] = np.linalg.norm(beta_ts - w_star)
     results["theilsen_mse"] = mean_squared_error(y_test, X_test @ beta_ts)
 
-    # 5. MoM (batch)
-    beta_mom = bucketed_median_regression(
-        X, y,
-        n_buckets=mom_n_buckets,
-        n_reps=mom_n_reps,
-        lambda_reg=mom_lambda,
-        random_state=42,
-    )
-    results["mom_err"] = np.linalg.norm(beta_mom - w_star)
-    results["mom_mse"] = mean_squared_error(y_test, X_test @ beta_mom)
-
-    # 6. Expander-single (1 seed)
+    # 4. Expander-single (1 seed)
     beta_exp_single = expander_sketch_regression_single_seed(
-        X, y,
+        X,
+        y,
         alpha=alpha,
         B=B_sketch,
         r=exp_single_r,
         dL=exp_single_dL,
         lambda_reg=exp_single_lambda,
         random_state=123,
+        use_networkx=use_networkx_expander,
+        graph=G_expander,
     )
     results["exp_single_err"] = np.linalg.norm(beta_exp_single - w_star)
-    results["exp_single_mse"] = mean_squared_error(y_test, X_test @ beta_exp_single)
+    results["exp_single_mse"] = mean_squared_error(
+        y_test,
+        X_test @ beta_exp_single,
+    )
 
-
-    # 7. Expander-list (Algorithm 1)
+    # 5. Expander-list (Algorithm 1)
     candidates = expander_sketch_list_regression(
-        X, y,
+        X,
+        y,
         alpha=alpha,
         r=exp_list_r,
         B=B_sketch,
@@ -196,8 +205,9 @@ def run_all_methods_for_alpha(alpha, outlier_mode="uniform", random_state=0):
         rho=exp_list_rho,
         cluster_radius=exp_list_cluster_radius,
         random_state=123,
-        prune_mode=prune_mode,
         verbose=False,
+        use_networkx=use_networkx_expander,
+        graph=G_expander,
     )
 
     best_err = None
@@ -218,19 +228,21 @@ def run_all_methods_for_alpha(alpha, outlier_mode="uniform", random_state=0):
 def check_ols_recovery(alpha_no_outliers=1.0, alpha_many_outliers=0.3):
     # Case 1: no outliers
     X1, y1, w_star1, mask1, info1 = generate_regression_with_outliers(
-        n=5000, d=20,
+        n=5000,
+        d=20,
         alpha=alpha_no_outliers,
         outlier_mode="uniform",
         outlier_scale=10.0,
-        random_state=0
+        random_state=123,
     )
     ols1 = LinearRegression().fit(X1, y1)
     err1 = np.linalg.norm(ols1.coef_ - w_star1)
     print(f"[alpha={alpha_no_outliers}] OLS ||w_hat - w_star||_2 = {err1:.4f}")
-    
-    # Expander-list on clean data
+
+    # Expander-list on clean data (random hashing mode)
     candidates_clean = expander_sketch_list_regression(
-        X1, y1,
+        X1,
+        y1,
         alpha=alpha_no_outliers,
         r=5,
         B=None,
@@ -240,201 +252,114 @@ def check_ols_recovery(alpha_no_outliers=1.0, alpha_many_outliers=0.3):
         lambda_reg=1e-3,
         cluster_radius=0.0,
         random_state=123,
+        use_networkx=False,
+        graph=None,
     )
 
-    print(f"[alpha={alpha_no_outliers}] Expander-list (clean) produced {len(candidates_clean)} candidates")
+    print(
+        f"[alpha={alpha_no_outliers}] Expander-list (clean) produced "
+        f"{len(candidates_clean)} candidates"
+    )
     for idx, beta in enumerate(candidates_clean):
         err = np.linalg.norm(beta - w_star1)
         print(f"  Clean cand {idx}: ||w_hat - w_star||_2 = {err:.4f}")
-    
+
     # Case 2: many outliers
     X2, y2, w_star2, mask2, info2 = generate_regression_with_outliers(
-        n=5000, d=20, alpha=alpha_many_outliers, 
+        n=5000,
+        d=20,
+        alpha=alpha_many_outliers,
         outlier_mode="uniform",
         outlier_scale=10.0,
-        random_state=1
+        random_state=123,
     )
     ols2 = LinearRegression().fit(X2, y2)
     err2 = np.linalg.norm(ols2.coef_ - w_star2)
     print(f"[alpha={alpha_many_outliers}] OLS ||w_hat - w_star||_2 = {err2:.4f}")
 
-    # ----- Make test set ONCE here so all methods (including oracle) can use it -----
     rng = np.random.default_rng(123)
     X_test = rng.normal(size=(2000, X1.shape[1]))
     y_test1 = X_test @ w_star1
     y_test2 = X_test @ w_star2
 
-    # --- Oracle check: how well can we do using only 'good' buckets? ---
-    r_oracle = 5
-    B_oracle = 1000
-
-    beta_oracle, K_good, B_val = oracle_inlier_bucket_regression(
-        X2,
-        y2,
-        inlier_mask=mask2,
-        alpha=alpha_many_outliers,
-        r=r_oracle,
-        B=B_oracle,
-        dL=2,
-        k_in_min=5,
-        k_out_max=5,
-        lambda_reg=1e-3,
-        random_state=123,
-    )
-
-    err_oracle = np.linalg.norm(beta_oracle - w_star2)
-    y_pred_oracle = X_test @ beta_oracle
-    mse_oracle = mean_squared_error(y_test2, y_pred_oracle)
-
-    print(f"[alpha={alpha_many_outliers}] ORACLE (good-buckets-only) used {K_good} buckets out of total {B_oracle * r_oracle}")
-    print(f"[alpha={alpha_many_outliers}] ORACLE ||w_hat - w_star||_2 = {err_oracle:.4f}")
-    print(f"[alpha={alpha_many_outliers}] ORACLE test MSE = {mse_oracle:.4f}")
-
-    # print("\n--- Debug: bucket contamination stats ---")
-    # debug_bucket_contamination(
-    #     X2,
-    #     y2,
-    #     inlier_mask=mask2,
-    #     alpha=alpha_many_outliers,
-    #     r=5,
-    #     B=B_oracle,
-    #     dL=2,
-    #     R=1,
-    #     random_state=123,
-    # )
-
-    # print("\n--- Debug: bucket scores vs goodness ---")
-    # debug_bucket_scores_vs_goodness(
-    #     X2,
-    #     y2,
-    #     inlier_mask=mask2,
-    #     alpha=alpha_many_outliers,
-    #     r=5,
-    #     B=1000,
-    #     dL=2,
-    #     lambda_reg=1e-3,
-    #     random_state=123,
-    #     k_in_min=5,
-    #     k_out_max=5,
-    # )
-
-    # print("\n--- Debug: survivor goodness (flip mode) ---")
-    # debug_survivor_goodness(
-    #     X2,
-    #     y2,
-    #     inlier_mask=mask2,
-    #     alpha=alpha_many_outliers,
-    #     r=8,
-    #     B=1000,
-    #     dL=2,
-    #     T=5,
-    #     lambda_reg=1e-3,
-    #     eta=0.1,
-    #     rho=0.4,
-    #     random_state=123,
-    #     prune_mode="flip",
-    #     k_in_min=5,
-    #     k_out_max=5,
-    # )
-
-
-    # OLS test MSEs
     mse1 = mean_squared_error(y_test1, X_test @ ols1.coef_)
     mse2 = mean_squared_error(y_test2, X_test @ ols2.coef_)
 
     print(f"[alpha={alpha_no_outliers}] OLS test MSE = {mse1:.4f}")
     print(f"[alpha={alpha_many_outliers}] OLS test MSE = {mse2:.4f}")
 
-    # === Sklearn robust baselines on the high-outlier case ===
-
-    # Ridge regression
+    # Robust baselines on high-outlier case
     beta_ridge = fit_ridge(X2, y2, alpha=1.0)
     err_ridge = np.linalg.norm(beta_ridge - w_star2)
     mse_ridge = mean_squared_error(y_test2, X_test @ beta_ridge)
     print(f"[alpha={alpha_many_outliers}] Ridge ||w_hat - w_star||_2 = {err_ridge:.4f}")
     print(f"[alpha={alpha_many_outliers}] Ridge test MSE = {mse_ridge:.4f}")
 
-    # Huber regression
     beta_huber = fit_huber(X2, y2, alpha=0.0001, epsilon=1.35)
     err_huber = np.linalg.norm(beta_huber - w_star2)
     mse_huber = mean_squared_error(y_test2, X_test @ beta_huber)
     print(f"[alpha={alpha_many_outliers}] Huber ||w_hat - w_star||_2 = {err_huber:.4f}")
     print(f"[alpha={alpha_many_outliers}] Huber test MSE = {mse_huber:.4f}")
 
-    # RANSAC regression
     beta_ransac = fit_ransac(X2, y2, min_samples=None, residual_threshold=None, max_trials=100)
     err_ransac = np.linalg.norm(beta_ransac - w_star2)
     mse_ransac = mean_squared_error(y_test2, X_test @ beta_ransac)
     print(f"[alpha={alpha_many_outliers}] RANSAC ||w_hat - w_star||_2 = {err_ransac:.4f}")
     print(f"[alpha={alpha_many_outliers}] RANSAC test MSE = {mse_ransac:.4f}")
 
-    # Theil-Sen regression
     beta_ts = fit_theilsen(X2, y2)
     err_ts = np.linalg.norm(beta_ts - w_star2)
     mse_ts = mean_squared_error(y_test2, X_test @ beta_ts)
     print(f"[alpha={alpha_many_outliers}] Theil-Sen ||w_hat - w_star||_2 = {err_ts:.4f}")
     print(f"[alpha={alpha_many_outliers}] Theil-Sen test MSE = {mse_ts:.4f}")
 
-    # --- Test bucketed median regression on the high-outlier case ---
-    beta_mom = bucketed_median_regression(X2, y2, n_buckets=50, n_reps=5, lambda_reg=1e-3, random_state=42)
-    err_mom = np.linalg.norm(beta_mom - w_star2)
-
-    y_pred_mom = X_test @ beta_mom
-    mse_mom = mean_squared_error(y_test2, y_pred_mom)
-
-    print(f"[alpha={alpha_many_outliers}] Bucketed-Median ||w_hat - w_star||_2 = {err_mom:.4f}")
-    print(f"[alpha={alpha_many_outliers}] Bucketed-Median test MSE = {mse_mom:.4f}")
-    
-    # --- Test simplified expander-sketch regression on the high-outlier case ---
+    # Single-seed expander (random hashing)
     beta_exp = expander_sketch_regression_single_seed(
-        X2, y2,
+        X2,
+        y2,
         alpha=alpha_many_outliers,
-        B=None,          # will pick ~ d/alpha
-        r=8,             # more repetitions
-        dL=3,            # each point hits 3 buckets
-        lambda_reg=1e-4, # a bit less regularization
+        B=None,
+        r=8,
+        dL=3,
+        lambda_reg=1e-4,
         random_state=123,
+        use_networkx=False,
+        graph=None,
     )
 
     err_exp = np.linalg.norm(beta_exp - w_star2)
-
-    y_pred_exp = X_test @ beta_exp
-    mse_exp = mean_squared_error(y_test2, y_pred_exp)
+    mse_exp = mean_squared_error(y_test2, X_test @ beta_exp)
 
     print(f"[alpha={alpha_many_outliers}] Expander-single ||w_hat - w_star||_2 = {err_exp:.4f}")
     print(f"[alpha={alpha_many_outliers}] Expander-single test MSE = {mse_exp:.4f}")
 
-    # --- Multi-seed expander-sketch list-decoding (Algorithm 1 style) ---
+    # Multi-seed expander list-decoding (random hashing)
     candidates = expander_sketch_list_regression(
-    X2, y2,
-    alpha=alpha_many_outliers,
-    r=8,            # more repetitions
-    B=B_oracle,     # 1000
-    dL=2,
-    T=7,            # more filtering rounds
-    R=10,
-    lambda_reg=1e-3,
-    theta=0.1,        # stricter spectral test
-    rho=0.5,        # prune more aggressively
-    cluster_radius=0,
-    random_state=123,
-    prune_mode="paper",  # Algorithm 1
-)
-
+        X2,
+        y2,
+        alpha=alpha_many_outliers,
+        r=8,
+        B=None,
+        dL=2,
+        T=7,
+        R=10,
+        lambda_reg=1e-3,
+        theta=0.1,
+        rho=0.5,
+        cluster_radius=0,
+        random_state=123,
+        use_networkx=False,
+        graph=None,
+    )
 
     print(f"[alpha={alpha_many_outliers}] Expander-list produced {len(candidates)} candidates")
 
-    # Evaluate each candidate; find best one (this imitates the 'list-decoding' success event)
     best_err = None
     best_mse = None
     for idx, beta in enumerate(candidates):
         err = np.linalg.norm(beta - w_star2)
-
-        y_pred = X_test @ beta
-        mse = mean_squared_error(y_test2, y_pred)
-
+        mse = mean_squared_error(y_test2, X_test @ beta)
         print(f"  Candidate {idx}: ||w_hat - w_star||_2 = {err:.4f}, test MSE = {mse:.4f}")
-
         if best_err is None or err < best_err:
             best_err = err
             best_mse = mse
@@ -442,37 +367,209 @@ def check_ols_recovery(alpha_no_outliers=1.0, alpha_many_outliers=0.3):
     if best_err is not None:
         print(f"  Best candidate: param error = {best_err:.4f}, test MSE = {best_mse:.4f}")
 
-def sweep_alpha_uniform():
+def sweep_alpha_uniform(use_networkx_expander: bool = False):
     """
-    Run run_single_experiment for several alpha values under uniform outliers,
-    print a compact summary, and return a list of result dicts.
+    Run experiments for several alpha values under uniform outliers.
+    Set use_networkx_expander=True to switch from random hashing
+    to NetworkX-constructed expanders.
     """
-    alphas = [1.0, 0.7, 0.5, 0.3, 0.2]
+    alphas = [0.4, 0.3, 0.2, 0.1]
     all_results = []
 
     for a in alphas:
-        res = run_all_methods_for_alpha(a, outlier_mode="uniform", random_state=0)
+        res = run_all_methods_for_alpha(
+            alpha=a,
+            outlier_mode="uniform",
+            random_state=0,
+            use_networkx_expander=use_networkx_expander,
+            n=5000,
+            d=20,
+            outlier_scale=10.0,
+        )
         all_results.append(res)
 
-        # --- pretty print to console ---
         print("\n===========================================")
-        print(f"Results for alpha = {a:.2f}, outlier_mode = uniform")
+        print(
+            f"Results for alpha = {a:.2f}, outlier_mode = uniform, "
+            f"use_networkx={use_networkx_expander}"
+        )
         print("-------------------------------------------")
         print(f"OLS        : err = {res['ols_err']:.4f},  mse = {res['ols_mse']:.4f}")
-        if res.get("oracle_err") is not None:
-            print(f"Oracle     : err = {res['oracle_err']:.4f},  mse = {res['oracle_mse']:.4f}")
         print(f"Ridge      : err = {res['ridge_err']:.4f},  mse = {res['ridge_mse']:.4f}")
         print(f"Huber      : err = {res['huber_err']:.4f},  mse = {res['huber_mse']:.4f}")
         print(f"RANSAC     : err = {res['ransac_err']:.4f},  mse = {res['ransac_mse']:.4f}")
         print(f"Theil-Sen  : err = {res['theilsen_err']:.4f},  mse = {res['theilsen_mse']:.4f}")
-        print(f"MoM (batch): err = {res['mom_err']:.4f},  mse = {res['mom_mse']:.4f}")
         print(f"Expander-1 : err = {res['exp_single_err']:.4f},  mse = {res['exp_single_mse']:.4f}")
-        print(f"Expander-L : best_err = {res['exp_list_best_err']:.4f}, "
-              f"best_mse = {res['exp_list_best_mse']:.4f}, "
-              f"#cands = {res['exp_list_num_cands']}")
+        print(
+            f"Expander-L : best_err = {res['exp_list_best_err']:.4f}, "
+            f"best_mse = {res['exp_list_best_mse']:.4f}, "
+            f"#cands = {res['exp_list_num_cands']}"
+        )
+
+    return all_results
+
+# def sweep_noise_modes(use_networkx_expander: bool = False):
+#     """
+#     Sweep over different outlier noise distributions and alpha.
+#     This lets you build tables indexed by (noise type, alpha).
+#     """
+#     alphas = [0.4, 0.3, 0.2, 0.1]
+#     noise_modes = ["uniform", "skewed", "gaussian_heavy"]  # must match data.py
+#     n = 5000
+#     d = 20
+#     outlier_scale = 10.0
+
+#     all_results = []
+
+#     for mode in noise_modes:
+#         print("\n##################################################")
+#         print(f"Noise mode = {mode}")
+#         print("##################################################")
+#         for a in alphas:
+#             res = run_all_methods_for_alpha(
+#                 alpha=a,
+#                 outlier_mode=mode,
+#                 random_state=0,
+#                 use_networkx_expander=use_networkx_expander,
+#                 n=n,
+#                 d=d,
+#                 outlier_scale=outlier_scale,
+#             )
+#             all_results.append(res)
+
+#             print("\n-------------------------------------------")
+#             print(
+#                 f"Results for alpha = {a:.2f}, mode = {mode}, "
+#                 f"use_networkx={use_networkx_expander}"
+#             )
+#             print("-------------------------------------------")
+#             print(f"OLS        : err = {res['ols_err']:.4f},  mse = {res['ols_mse']:.4f}")
+#             print(f"Ridge      : err = {res['ridge_err']:.4f},  mse = {res['ridge_mse']:.4f}")
+#             print(f"Huber      : err = {res['huber_err']:.4f},  mse = {res['huber_mse']:.4f}")
+#             print(f"RANSAC     : err = {res['ransac_err']:.4f},  mse = {res['ransac_mse']:.4f}")
+#             print(f"Theil-Sen  : err = {res['theilsen_err']:.4f},  mse = {res['theilsen_mse']:.4f}")
+#             print(f"Expander-1 : err = {res['exp_single_err']:.4f},  mse = {res['exp_single_mse']:.4f}")
+#             print(
+#                 f"Expander-L : best_err = {res['exp_list_best_err']:.4f}, "
+#                 f"best_mse = {res['exp_list_best_mse']:.4f}, "
+#                 f"#cands = {res['exp_list_num_cands']}"
+#             )
+
+#     return all_results
+
+def sweep_n_d(use_networkx_expander: bool = False):
+    """
+    Sweep over different (n, d) to study scaling behavior.
+
+    For each (n, d) we vary alpha on a smaller grid to keep runtime reasonable.
+    """
+    n_values = [5000, 10000]
+    d_values = [20, 50]
+    alphas = [0.4, 0.3, 0.2, 0.1]
+    outlier_mode = "uniform"
+    outlier_scale = 10.0
+
+    all_results = []
+
+    for n in n_values:
+        for d in d_values:
+            print("\n##################################################")
+            print(f"(n, d) = ({n}, {d}), mode = {outlier_mode}")
+            print("##################################################")
+
+            for a in alphas:
+                res = run_all_methods_for_alpha(
+                    alpha=a,
+                    outlier_mode=outlier_mode,
+                    random_state=0,
+                    use_networkx_expander=use_networkx_expander,
+                    n=n,
+                    d=d,
+                    outlier_scale=outlier_scale,
+                )
+                all_results.append(res)
+
+                print("\n-------------------------------------------")
+                print(
+                    f"n = {n}, d = {d}, alpha = {a:.2f}, "
+                    f"use_networkx={use_networkx_expander}"
+                )
+                print("-------------------------------------------")
+                print(f"OLS        : err = {res['ols_err']:.4f},  mse = {res['ols_mse']:.4f}")
+                print(f"Ridge      : err = {res['ridge_err']:.4f},  mse = {res['ridge_mse']:.4f}")
+                print(f"Huber      : err = {res['huber_err']:.4f},  mse = {res['huber_mse']:.4f}")
+                print(f"RANSAC     : err = {res['ransac_err']:.4f},  mse = {res['ransac_mse']:.4f}")
+                print(f"Theil-Sen  : err = {res['theilsen_err']:.4f},  mse = {res['theilsen_mse']:.4f}")
+                print(f"Expander-1 : err = {res['exp_single_err']:.4f},  mse = {res['exp_single_mse']:.4f}")
+                print(
+                    f"Expander-L : best_err = {res['exp_list_best_err']:.4f}, "
+                    f"best_mse = {res['exp_list_best_mse']:.4f}, "
+                    f"#cands = {res['exp_list_num_cands']}"
+                )
+
+    return all_results
+
+def sweep_outlier_scale(use_networkx_expander: bool = False):
+    """
+    Sweep over different outlier_scale values, for a fixed (n, d) and noise mode.
+    This lets you see how increasing corruption magnitude affects each method.
+    """
+    scales = [5.0, 10.0, 20.0]
+    alphas = [0.4, 0.3, 0.2, 0.1]
+    n = 5000
+    d = 20
+    outlier_mode = "uniform"
+
+    all_results = []
+
+    for scale in scales:
+        print("\n##################################################")
+        print(f"outlier_scale = {scale}, mode = {outlier_mode}")
+        print("##################################################")
+        for a in alphas:
+            res = run_all_methods_for_alpha(
+                alpha=a,
+                outlier_mode=outlier_mode,
+                random_state=0,
+                use_networkx_expander=use_networkx_expander,
+                n=n,
+                d=d,
+                outlier_scale=scale,
+            )
+            all_results.append(res)
+
+            print("\n-------------------------------------------")
+            print(
+                f"scale = {scale}, alpha = {a:.2f}, "
+                f"use_networkx={use_networkx_expander}"
+            )
+            print("-------------------------------------------")
+            print(f"OLS        : err = {res['ols_err']:.4f},  mse = {res['ols_mse']:.4f}")
+            print(f"Ridge      : err = {res['ridge_err']:.4f},  mse = {res['ridge_mse']:.4f}")
+            print(f"Huber      : err = {res['huber_err']:.4f},  mse = {res['huber_mse']:.4f}")
+            print(f"RANSAC     : err = {res['ransac_err']:.4f},  mse = {res['ransac_mse']:.4f}")
+            print(f"Theil-Sen  : err = {res['theilsen_err']:.4f},  mse = {res['theilsen_mse']:.4f}")
+            print(f"Expander-1 : err = {res['exp_single_err']:.4f},  mse = {res['exp_single_mse']:.4f}")
+            print(
+                f"Expander-L : best_err = {res['exp_list_best_err']:.4f}, "
+                f"best_mse = {res['exp_list_best_mse']:.4f}, "
+                f"#cands = {res['exp_list_num_cands']}"
+            )
 
     return all_results
 
 if __name__ == "__main__":
-    sweep_alpha_uniform()
-    # check_ols_recovery()  # optional debug
+    # Example: original uniform-alpha sweep
+    #sweep_alpha_uniform(use_networkx_expander=False)
+
+    # To sweep different noise distributions:
+    #sweep_noise_modes(use_networkx_expander=False)
+
+    # To sweep over (n, d):
+    #sweep_n_d(use_networkx_expander=False)
+
+    # To sweep over outlier_scale:
+    sweep_outlier_scale(use_networkx_expander=False)
+
+    # Optional detailed check:
+    # check_ols_recovery()

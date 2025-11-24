@@ -1,5 +1,4 @@
 # baselines_sklearn.py
-import numpy as np
 from sklearn.linear_model import (
     LinearRegression,
     Ridge,
@@ -49,7 +48,7 @@ def fit_ransac(X, y, min_samples=None, residual_threshold=None, max_trials=100):
         min_samples=min_samples,
         residual_threshold=residual_threshold,
         max_trials=max_trials,
-        random_state=0,
+        random_state=123,
     ).fit(X, y)
 
     # After fitting, model.estimator_ holds the fitted base estimator.
@@ -66,5 +65,5 @@ def fit_theilsen(X, y):
     """
     Theil-Sen regression baseline (robust in x and y, but slower).
     """
-    model = TheilSenRegressor(fit_intercept=False, random_state=0).fit(X, y)
+    model = TheilSenRegressor(fit_intercept=False, random_state=123).fit(X, y)
     return model.coef_
