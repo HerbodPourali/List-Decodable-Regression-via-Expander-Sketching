@@ -13,11 +13,7 @@ from baselines_sklearn import fit_ridge, fit_huber, fit_ransac, fit_theilsen
 from expander_sketch_single import expander_sketch_regression_single_seed
 from expander_sketch_list import expander_sketch_list_regression
 
-
-# ---------------------------------------------------------
 # Loaders
-# ---------------------------------------------------------
-
 def load_casp(path="Datasets/CASP/CASP.csv"):
     df = pd.read_csv(path)
     y = df.iloc[:, 0].to_numpy(float)
@@ -30,11 +26,7 @@ def load_concrete(path="Datasets/concrete+compressive+strength/Concrete_Data.xls
     X = df.iloc[:, :-1].to_numpy(float)
     return X, y
 
-
-# ---------------------------------------------------------
 # Preprocessing
-# ---------------------------------------------------------
-
 def joint_preprocess_to_10d(X_in, X_out, degree=2, d_target=10, random_state=0):
     d_in = X_in.shape[1]
     d_out = X_out.shape[1]
@@ -60,11 +52,7 @@ def joint_preprocess_to_10d(X_in, X_out, degree=2, d_target=10, random_state=0):
     n_in = X_in.shape[0]
     return X_10d[:n_in], X_10d[n_in:]
 
-
-# ---------------------------------------------------------
 # Real-data mixture builder
-# ---------------------------------------------------------
-
 def build_real_mix(
     X_in, y_in,
     X_out, y_out,
@@ -99,11 +87,7 @@ def build_real_mix(
     perm = rng.permutation(n_total)
     return X_mix[perm], y_mix[perm], mask[perm]
 
-
-# ---------------------------------------------------------
 # Main experiment
-# ---------------------------------------------------------
-
 def main():
     # Load datasets
     X_casp_raw, y_casp = load_casp()
@@ -112,33 +96,27 @@ def main():
     print("CASP:", X_casp_raw.shape)
     print("Concrete:", X_conc_raw.shape)
 
-    # --------------------------------------------
     # Preprocess to common 10D space
-    # --------------------------------------------
     X_casp_10, X_conc_10 = joint_preprocess_to_10d(X_casp_raw, X_conc_raw)
 
-    # --------------------------------------------
     # t-SNE PLOT — added here
-    # --------------------------------------------
-    print("Running t-SNE...")
-    X_all = np.vstack([X_casp_10, X_conc_10])
-    labels = np.array([1]*len(X_casp_10) + [0]*len(X_conc_10))  # 1=inlier, 0=outlier
+    # print("Running t-SNE...")
+    # X_all = np.vstack([X_casp_10, X_conc_10])
+    # labels = np.array([1]*len(X_casp_10) + [0]*len(X_conc_10))  # 1=inlier, 0=outlier
 
-    tsne = TSNE(n_components=2, perplexity=40, learning_rate=200, random_state=0)
-    X_emb = tsne.fit_transform(X_all)
+    # tsne = TSNE(n_components=2, perplexity=40, learning_rate=200, random_state=0)
+    # X_emb = tsne.fit_transform(X_all)
 
-    plt.figure(figsize=(8,6))
-    plt.scatter(X_emb[labels==1,0], X_emb[labels==1,1], s=12, alpha=0.8, label="CASP Inliers", c='tab:blue')
-    plt.scatter(X_emb[labels==0,0], X_emb[labels==0,1], s=12, alpha=0.8, label="Concrete Outliers", c='tab:orange')
-    plt.legend()
-    plt.title("t-SNE of CASP (inliers) + Concrete (outliers)")
-    plt.tight_layout()
-    plt.savefig("tsne_casp_concrete.pdf")
-    print("Saved t-SNE to tsne_casp_concrete.pdf\n")
+    # plt.figure(figsize=(8,6))
+    # plt.scatter(X_emb[labels==1,0], X_emb[labels==1,1], s=12, alpha=0.8, label="CASP Inliers", c='tab:blue')
+    # plt.scatter(X_emb[labels==0,0], X_emb[labels==0,1], s=12, alpha=0.8, label="Concrete Outliers", c='tab:orange')
+    # plt.legend()
+    # plt.title("t-SNE of CASP (inliers) + Concrete (outliers)")
+    # plt.tight_layout()
+    # plt.savefig("tsne_casp_concrete.pdf")
+    # print("Saved t-SNE to tsne_casp_concrete.pdf\n")
 
-    # --------------------------------------------
     # Build CASP-only clean test set
-    # --------------------------------------------
     rng = np.random.default_rng(123)
     n_test = 1000
     idx_test = rng.choice(len(X_casp_10), size=n_test, replace=False)
@@ -156,9 +134,7 @@ def main():
     mse_oracle = mean_squared_error(y_test, ols_oracle.predict(X_test))
     print("Oracle OLS =", mse_oracle)
 
-    # --------------------------------------------
     # Build mixture CASP-inliers + Concrete-outliers
-    # --------------------------------------------
     X_mix, y_mix, mask = build_real_mix(
         X_in=X_casp_train, y_in=y_casp_train,
         X_out=X_conc_10, y_out=y_conc,
@@ -170,10 +146,7 @@ def main():
     eff_alpha = mask.mean()
     print("Effective α =", eff_alpha)
 
-    # --------------------------------------------
     # Run regressors
-    # --------------------------------------------
-
     # Baselines
     mse_ols = mean_squared_error(y_test, LinearRegression().fit(X_mix, y_mix).predict(X_test))
     mse_ridge = mean_squared_error(y_test, X_test @ fit_ridge(X_mix, y_mix, alpha=1.0))
@@ -190,7 +163,7 @@ def main():
     # Expander-1
     beta1 = expander_sketch_regression_single_seed(
         X_mix, y_mix,
-        alpha=eff_alpha, B=1000, r=8, dL=2, lambda_reg=1e-4, random_state=123
+        alpha=eff_alpha, B=1000, r=8, dL=2, lambda_reg=1e-3, random_state=123
     )
     mse_exp1 = mean_squared_error(y_test, X_test @ beta1)
     print("Expander-1 =", mse_exp1)
@@ -199,16 +172,15 @@ def main():
     candidates = expander_sketch_list_regression(
         X_mix, y_mix,
         alpha=eff_alpha,
-        r=7, B=1000, dL=2, T=10, R=15,
+        r=8, B=1000, dL=2, T=7, R=10,
         lambda_reg=1e-3,
-        theta=0.07, rho=0.45,
+        theta=0.10, rho=0.45,
         cluster_radius=0.0,
         random_state=123,
     )
 
     mse_expL = min(mean_squared_error(y_test, X_test @ c) for c in candidates)
     print("Expander-L best =", mse_expL)
-
 
 if __name__ == "__main__":
     main()

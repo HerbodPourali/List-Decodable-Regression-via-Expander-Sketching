@@ -59,8 +59,6 @@ def build_label_corruption_mix(
 
     perm = rng.permutation(n_total)
     return X_mix[perm], y_mix[perm], mask[perm]
-
-
 # ---------------------------------------------------------
 # Main experiment
 # ---------------------------------------------------------
@@ -189,7 +187,6 @@ def main():
     print(f"RANSAC       : {mse_ransac:.4f}")
     print(f"Expander-1   : {mse_exp1:.4f}")
     print(f"Expander-L   : {best:.4f}")
-
 
 if __name__ == "__main__":
     main()

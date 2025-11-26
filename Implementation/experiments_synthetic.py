@@ -649,7 +649,7 @@ def sweep_R(use_networkx_expander: bool = False):
     outlier_mode = "uniform"
     outlier_scale = 10.0
 
-    R_values = list(range(1, 11))
+    R_values = list(range(1, 16))
     all_results = []
     mse_vals = []
 
@@ -855,7 +855,7 @@ def sweep_r(use_networkx_expander: bool = False):
     outlier_mode = "uniform"
     outlier_scale = 10.0
 
-    r_values = list(range(1, 16))
+    r_values = list(range(1, 11))
     mse_vals = []
     all_results = []
 
@@ -879,7 +879,7 @@ def sweep_r(use_networkx_expander: bool = False):
     os.makedirs("Figures", exist_ok=True)
     plt.figure()
     plt.plot(r_values, mse_vals, marker="o")
-    plt.xticks(range(1, 16, 2))
+    plt.xticks(range(1, 11, 2))
     plt.xlabel("Repetitions per seed $r$")
     plt.ylabel("Test MSE")
     plt.title("Expander-L: sensitivity to $r$")
@@ -1331,17 +1331,17 @@ def sweep_alpha_mse(
 
 if __name__ == "__main__":
     # sweep_alpha_uniform(use_networkx_expander=False)
-    # sweep_n_d(use_networkx_expander=False)
+    sweep_n_d(use_networkx_expander=False)
     # sweep_outlier_scale(use_networkx_expander=False)
     # sweep_outlier_scale_mse(use_networkx_expander= False)
-    sweep_R(use_networkx_expander=False)
+    # sweep_R(use_networkx_expander=False)
     # sweep_T(use_networkx_expander=False)
     # sweep_dL(use_networkx_expander=False)
     # sweep_lambda(use_networkx_expander=False)
-    sweep_r(use_networkx_expander= False)
-    sweep_theta(use_networkx_expander= False)
+    # sweep_r(use_networkx_expander= False)
+    # sweep_theta(use_networkx_expander= False)
     # sweep_rho(use_networkx_expander= False)
-    sweep_B(use_networkx_expander=False)
+    # sweep_B(use_networkx_expander=False)
     # sweep_cluster_radius(use_networkx_expander= False)
     # plot_tsne_synthetic()
     # sweep_alpha_mse()
